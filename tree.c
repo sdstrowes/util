@@ -553,7 +553,9 @@ int main(int argc, char* argv[])
 	   convert. */
 	in = fopen(ifile, "r");
 	while (1) {
-		char line[4096];
+		char *line = NULL;
+		size_t linecap = 0;
+		ssize_t linelen;
 		char* rtp;
 		char address_string[16];
 		char output[16];
@@ -563,9 +565,8 @@ int main(int argc, char* argv[])
 		int rt;
 
 		/* Read line. */
-		memset(line, '\0', 4096);
-		rtp = fgets(line, 4096, in);
-		if (rtp == NULL) {
+		linelen = getline(&line, &linecap, in);
+		if (linelen < 0) {
 			break;
 		}
 
