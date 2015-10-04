@@ -269,10 +269,8 @@ int lpm_insert(struct lpm_tree* tree, char* ip_string, uint32_t netmask)
 		memset(buffer, '\0', 129);
 		printf("%s\n", print_binary((uint8_t *)&prefix6->sin6_addr, sizeof(prefix6->sin6_addr), buffer, 129));
 
-		insert(prefix, netmask, tree->head);
-
 		DEBUG(">> Inserting %s/%d ========\n", ip_string, netmask);
-		//insert(ip6, netmask, tree->head);
+		insert(prefix, netmask, tree->head);
 		DEBUG(">> Done inserting %s/%d ===\n", ip_string, netmask);
 
 		return 1;
