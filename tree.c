@@ -526,16 +526,15 @@ int main(int argc, char* argv[])
 	/* Read in all prefixes. */
 	in = fopen(input, "r");
 	while (1) {
+		char *line = NULL;
+		size_t linecap = 0;
+		ssize_t linelen;
 		char ip_string[INET6_ADDRSTRLEN];
 		int mask;
 		uint8_t rt;
-		char line[4096];
-		char* rtp;
 
-		memset(line, '\0', 4096);
-		rtp = fgets(line, 4096, in);
-		/* EOL */
-		if (rtp == NULL) {
+		linelen = getline(&line, &linecap, in);
+		if (linelen < 0) {
 			break;
 		}
 		rt = sscanf(line, "%39s %d%*[^\n]", ip_string, &mask);
@@ -556,7 +555,6 @@ int main(int argc, char* argv[])
 		char *line = NULL;
 		size_t linecap = 0;
 		ssize_t linelen;
-		char* rtp;
 		char address_string[16];
 		char output[16];
 		char* pointer;
@@ -602,6 +600,8 @@ int main(int argc, char* argv[])
 		else {
 			printf("%s\n", strstart);
 		}
+
+		free(line);
 	}
 
 	lpm_destroy(tree);
