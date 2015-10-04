@@ -292,6 +292,27 @@ int lpm_insert(struct lpm_tree* tree, char* ip_string, uint32_t netmask)
 	return 0;
 }
 
+bool test_mask(struct sockaddr_in6 *prefix, uint8_t masklen, struct sockaddr_in6 *match_addr) {
+	int i;
+
+	int num_full_bytes     = masklen / 8;
+	int bits_in_final_byte = masklen % 8;
+
+	for (i = 0; i < num_full_bytes; i++) {
+		if (prefix->sin6_addr.s6_addr[i] != match_addr->sin6_addr.s6_addr[i]) {
+			return false;
+		}
+
+		masklen -= 8;
+	}
+
+	if (bits_in_final_byte == 0 || (match_addr->sin6_addr.s6_addr[i] & masklen) == prefix->sin6_addr.s6_addr[i]) {
+		return true;
+	}
+
+	return false;
+}
+
 /*
  * Internal function; called by lpm_lookup()
  */
@@ -334,7 +355,13 @@ void lookup(struct sockaddr_storage *addr, char* output, struct internal_node* n
 				struct sockaddr_in6 *match_addr = (struct sockaddr_in6 *)addr;
 				inet_ntop(AF_INET6, &match_addr->sin6_addr, prefix, INET6_ADDRSTRLEN);
 
-				printf("WARNING: IPv6 unhandled!\n");
+				if (test_mask((struct sockaddr_in6 *)node->prefix, node->netmask, match_addr)) {
+					best_prefix  = node->prefix;
+					best_netmask = node->netmask;
+				}
+				else {
+					break;
+				}
 
 				break;
 			}
@@ -367,7 +394,8 @@ void lookup(struct sockaddr_storage *addr, char* output, struct internal_node* n
 		char prefix[INET6_ADDRSTRLEN];
 		switch (best_prefix->ss_family) {
 		case AF_INET6: {
-			inet_ntop(AF_INET6, &((struct sockaddr_in6 *)&best_prefix)->sin6_addr, prefix, INET6_ADDRSTRLEN);
+			struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *)best_prefix;
+			inet_ntop(AF_INET6, &addr6->sin6_addr, prefix, INET6_ADDRSTRLEN);
 			break;
 		}
 		case AF_INET: {
