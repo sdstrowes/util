@@ -26,6 +26,7 @@
 
 #include <stdio.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <getopt.h>
@@ -35,6 +36,7 @@
 #include <fcntl.h>
 
 #include <arpa/inet.h>
+#include <netinet/in.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 
@@ -43,18 +45,49 @@ int debug = 0;
 /*#define DEBUG(fmt, ...) do { if (debug) fprintf(stderr, fmt, __VA_ARGS__); } while (0)*/
 #define DEBUG(...) do { if (debug) fprintf(stdout, __VA_ARGS__); } while (0)
 
+char *print_binary(uint8_t *data, int data_byte_len, char *out, int out_byte_len)
+{
+	char *ptr = out + out_byte_len - 2;
+	uint8_t one  = 1;
+
+	while (data_byte_len != 0) {
+		data_byte_len--;
+		uint8_t current_byte = data[data_byte_len];
+		int i;
+		for (i = 7; i >= 0; i--) {
+			*ptr = (current_byte & one) ? '1' : '0';
+			ptr--;
+			current_byte = current_byte >> 1;
+		}
+	}
+
+	return out;
+}
+
 /*
  * This creates an data (value-holding) node which points nowhere.
  */
-struct data_node* create_data_node(uint32_t prefix, uint8_t netmask)
+struct data_node* create_data_node(struct sockaddr_storage *prefix, uint8_t netmask)
 {
 	struct data_node* node = (struct data_node*)malloc(sizeof(struct data_node));
-	DEBUG("## Created data node %p for %d\n", (void*)node, prefix);
 	node->type  = DAT_NODE;
 	node->prefix = prefix;
 	node->netmask  = netmask;
 	node->l = NULL;
 	node->r = NULL;
+
+	char prefix_str[INET6_ADDRSTRLEN];
+	switch (prefix->ss_family) {
+	case AF_INET6: {
+		inet_ntop(AF_INET6, &((struct sockaddr_in6 *)prefix)->sin6_addr, prefix_str, INET6_ADDRSTRLEN);
+		break;
+	}
+	case AF_INET: {
+		inet_ntop(AF_INET, &((struct sockaddr_in *)prefix)->sin_addr, prefix_str, INET_ADDRSTRLEN);
+		break;
+	}
+	}
+	DEBUG("## Created data node %p for %s\n", (void*)node, prefix_str);
 
 	return node;
 }
@@ -73,15 +106,46 @@ struct internal_node* create_internal_node()
 	return tmp;
 }
 
+bool test_v_bit(struct sockaddr_storage *addr, uint8_t bit)
+{
+	if (addr->ss_family == AF_INET6) {
+		struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *)addr;
+
+		uint8_t byte_idx    = bit / 8;
+		uint8_t subbyte_idx = bit % 8;
+
+		uint8_t subbyte = addr6->sin6_addr.s6_addr[byte_idx];
+		uint8_t v_bit = subbyte & ((uint8_t)pow(2, subbyte_idx));
+
+		return v_bit;
+	}
+	else if (addr->ss_family == AF_INET) {
+		struct sockaddr_in *addr4 = (struct sockaddr_in *)addr;
+		uint32_t v_bit = addr4->sin_addr.s_addr & ((uint32_t)pow(2, bit));
+
+		return v_bit;
+	}
+
+	return 0;
+}
+
 /*
  * This function used internally; see lpm_insert().
  */
-void insert(uint32_t prefix, uint32_t nm, struct internal_node* n)
+void insert(struct sockaddr_storage *prefix, uint32_t nm, struct internal_node* n)
 {
-	uint8_t b = MAX_BITS;
+	uint8_t b = 0;
 	uint8_t depth = 0;
 	struct internal_node* parent;
 	struct internal_node* next = n;
+
+	if (prefix->ss_family == AF_INET6) {
+		b = MAX_BITS6;
+	}
+	else if (prefix->ss_family == AF_INET) {
+		b = MAX_BITS4;
+	}
+
 
 	/* First, find the correct location for the prefix. Burrow down to
 	   the correct depth, potentially creating internal nodes as I
@@ -92,7 +156,7 @@ void insert(uint32_t prefix, uint32_t nm, struct internal_node* n)
 		depth++;
 
 		parent = (struct internal_node*)n;
-		uint32_t v_bit = prefix & ((uint32_t)pow(2, b));
+		bool v_bit = test_v_bit(prefix, b);
 
 		/* Determine which direction to descend. */
 		if (v_bit) {
@@ -112,7 +176,7 @@ void insert(uint32_t prefix, uint32_t nm, struct internal_node* n)
 	if (next == NULL) {
 		/* The easy case. */
 		struct data_node* node = create_data_node(prefix, nm);
-		uint32_t v_bit = prefix & ((uint32_t)pow(2, b));
+		bool v_bit = test_v_bit(prefix, b);
 		if (v_bit) {
 			parent->r = (struct internal_node*)node;
 		}
@@ -123,7 +187,7 @@ void insert(uint32_t prefix, uint32_t nm, struct internal_node* n)
 	else if (next->type == INT_NODE) {
 		/* In this case, we've descended as far as we can. Attach the
 		   prefix here. */
-		uint32_t v_bit = prefix & ((uint32_t)pow(2, b));
+		bool v_bit = test_v_bit(prefix, b);
 		struct data_node* newnode = create_data_node(prefix, nm);
 		newnode->l = next->l;
 		newnode->r = next->r;
@@ -135,7 +199,7 @@ void insert(uint32_t prefix, uint32_t nm, struct internal_node* n)
 			n->l = (struct internal_node*)newnode;
 		}
 
-		DEBUG("## Freeing %p\n", (void*)n);
+		DEBUG("## Freeing %p\n", (void*)next);
 		free(next);
 	}
 }
@@ -184,6 +248,7 @@ struct lpm_tree* lpm_init()
 	return tree;
 }
 
+
 /* lpm_insert:
  * Insert a new prefix ('ip_string' and 'netmask') into the tree. If
  * 'ip_string' does not contain a valid IPv4 address, or the netmask
@@ -192,42 +257,66 @@ struct lpm_tree* lpm_init()
  */
 int lpm_insert(struct lpm_tree* tree, char* ip_string, uint32_t netmask)
 {
-	uint32_t ip;
-	if (!inet_pton(AF_INET, ip_string, &ip) || netmask > 32) {
-		return 0;
+	struct sockaddr_storage *prefix = (struct sockaddr_storage *)malloc(sizeof(struct sockaddr_storage));
+
+	struct sockaddr_in6 *prefix6 = (struct sockaddr_in6 *)prefix;
+	struct sockaddr_in  *prefix4 = (struct sockaddr_in *) prefix;
+
+	if (inet_pton(AF_INET6, ip_string, &prefix6->sin6_addr) == 1 && netmask <= MAX_BITS6) {
+		prefix->ss_family = AF_INET6;
+
+		char buffer[129];
+		memset(buffer, '\0', 129);
+		printf("%s\n", print_binary((uint8_t *)&prefix6->sin6_addr, sizeof(prefix6->sin6_addr), buffer, 129));
+
+		insert(prefix, netmask, tree->head);
+
+		DEBUG(">> Inserting %s/%d ========\n", ip_string, netmask);
+		//insert(ip6, netmask, tree->head);
+		DEBUG(">> Done inserting %s/%d ===\n", ip_string, netmask);
+
+		return 1;
 	}
-	ip = ntohl(ip);
+	else if (inet_pton(AF_INET, ip_string, &prefix4->sin_addr) == 1 && netmask <= MAX_BITS4) {
+		prefix4->sin_family = AF_INET;
+		prefix4->sin_addr.s_addr = htonl(prefix4->sin_addr.s_addr);
 
-	DEBUG(">> Inserting %s/%d===================================================\n", ip_string, netmask);
+		char buffer[33];
+		memset(buffer, '\0', 33);
+		printf("%s\n", print_binary((uint8_t *)&prefix4->sin_addr, sizeof(prefix4->sin_addr), buffer, 32));
 
-	insert(ip, netmask, tree->head);
-	DEBUG(">> Done inserting %s/%d =============================================\n", ip_string, netmask);
+		DEBUG(">> Inserting %s/%d ========\n", ip_string, netmask);
+		insert(prefix, netmask, tree->head);
+		DEBUG(">> Done inserting %s/%d ===\n", ip_string, netmask);
+		return 1;
+	}
 
-	return 1;
+	return 0;
 }
 
 /*
  * Internal function; called by lpm_lookup()
  */
-void lookup(uint32_t address, char* output, struct internal_node* n)
+void lookup(struct sockaddr_storage *addr, char* output, struct internal_node* n)
 {
-	uint32_t b = MAX_BITS;
-	struct internal_node* parent;
+	uint32_t b = 0;
 	struct internal_node* next = n;
 
-	uint32_t best_prefix = 0;
-	uint8_t  best_netmask = 0;
+	struct  sockaddr_storage *best_prefix = NULL;
+	uint8_t best_netmask = 0;
 
-	char addr_string[16];
-	uint32_t tmp = htonl(address);
-	inet_ntop(AF_INET, &tmp, addr_string, 16);
+	if (addr->ss_family == AF_INET6) {
+		b = MAX_BITS6;
+	}
+	else if (addr->ss_family == AF_INET) {
+		b = MAX_BITS4;
+	}
 
 	do {
 		n = next;
 		b--;
 
-		parent = (struct internal_node*)n;
-		uint32_t v_bit = address & ((uint32_t)pow(2, b));
+		bool v_bit = test_v_bit(addr, b);
 
 		/* If we've found an internal node, determine which
 		   direction to descend. */
@@ -241,31 +330,57 @@ void lookup(uint32_t address, char* output, struct internal_node* n)
 		if (n->type == DAT_NODE) {
 			struct data_node* node = (struct data_node*)n;
 
-			char prefix[16];
-			tmp = htonl(node->prefix);
-			inet_ntop(AF_INET, &tmp, prefix, 16);
+			char prefix[INET6_ADDRSTRLEN];
+			switch (node->prefix->ss_family) {
+			case AF_INET6: {
+				struct sockaddr_in6 *match_addr = (struct sockaddr_in6 *)addr;
+				inet_ntop(AF_INET6, &match_addr->sin6_addr, prefix, INET6_ADDRSTRLEN);
 
-			uint32_t mask = 0xFFFFFFFF;
+				printf("WARNING: IPv6 unhandled!\n");
 
-			mask = mask - ((uint32_t)pow(2, 32 - node->netmask) - 1);
-
-			if ((address & mask) == node->prefix) {
-				best_prefix = node->prefix;
-				best_netmask = node->netmask;
-			}
-			else {
 				break;
+			}
+			case AF_INET: {
+				struct sockaddr_in *match_addr = (struct sockaddr_in *)addr;
+				struct sockaddr_in *node_addr  = (struct sockaddr_in *)node->prefix;
+				inet_ntop(AF_INET, &match_addr->sin_addr, prefix, INET6_ADDRSTRLEN);
+
+				uint32_t mask = 0xFFFFFFFF;
+				mask = mask - ((uint32_t)pow(2, 32 - node->netmask) - 1);
+
+				if ((match_addr->sin_addr.s_addr & mask) == node_addr->sin_addr.s_addr) {
+					best_prefix = node->prefix;
+					best_netmask = node->netmask;
+				}
+				else {
+					break;
+				}
+
+				break;
+			}
 			}
 		}
 	} while (next != NULL);
 
-	if (!best_prefix) {
+	if (best_prefix == NULL) {
 		sprintf(output, "NF");
 	}
 	else {
-		char prefix[16];
-		tmp = htonl(best_prefix);
-		inet_ntop(AF_INET, &tmp, prefix, 16);
+		char prefix[INET6_ADDRSTRLEN];
+		switch (best_prefix->ss_family) {
+		case AF_INET6: {
+			inet_ntop(AF_INET6, &((struct sockaddr_in6 *)&best_prefix)->sin6_addr, prefix, INET6_ADDRSTRLEN);
+			break;
+		}
+		case AF_INET: {
+			struct sockaddr_in *addr4 = (struct sockaddr_in *)best_prefix;
+			struct in_addr addr_bytes;
+			addr_bytes.s_addr = htonl(addr4->sin_addr.s_addr);
+			inet_ntop(AF_INET, &addr_bytes, prefix, INET_ADDRSTRLEN);
+			break;
+		}
+		}
+
 
 		sprintf(output, "%s/%d", prefix, best_netmask);
 	}
@@ -281,14 +396,17 @@ void lookup(uint32_t address, char* output, struct internal_node* n)
  */
 int lpm_lookup(struct lpm_tree* tree, char* ip_string, char* output)
 {
-	uint32_t tmp;
-	int rt;
-	rt = inet_pton(AF_INET, ip_string, &tmp);
-	if (!rt) {
-		return 0;
+	struct sockaddr_storage addr;
+
+	if (inet_pton(AF_INET6, ip_string, &((struct sockaddr_in6 *)&addr)->sin6_addr)) {
+		lookup(&addr, output, tree->head);
 	}
-	uint32_t ip = ntohl(tmp);
-	lookup(ip, output, tree->head);
+	else if (inet_pton(AF_INET, ip_string, &((struct sockaddr_in *)&addr)->sin_addr)) {
+		struct sockaddr_in *addr4 = (struct sockaddr_in *)&addr;
+		addr4->sin_family = AF_INET;
+		addr4->sin_addr.s_addr = htonl(addr4->sin_addr.s_addr);
+		lookup(&addr, output, tree->head);
+	}
 	return 1;
 }
 
@@ -325,9 +443,24 @@ void debug_print(struct internal_node* parent, int left, int depth, struct inter
 	else {
 		struct data_node* node = (struct data_node*)n;
 
-		uint32_t tmp = htonl(node->prefix);
-		char output[16];
-		inet_ntop(AF_INET, &tmp, output, 16);
+		char output[INET6_ADDRSTRLEN];
+		memset(output, 0, INET6_ADDRSTRLEN);
+		struct sockaddr_storage *addr = node->prefix;
+		switch (addr->ss_family) {
+		case AF_INET6: {
+			struct sockaddr_in6 *addr6 = (struct sockaddr_in6 *)addr;
+			inet_ntop(AF_INET6, &addr6->sin6_addr, output, INET6_ADDRSTRLEN);
+			break;
+		}
+		case AF_INET: {
+			struct sockaddr_in *addr4 = (struct sockaddr_in *)addr;
+			inet_ntop(AF_INET, &addr4->sin_addr, output, INET6_ADDRSTRLEN);
+			char buffer[33];
+			memset(buffer, '\0', 33);
+			printf("%s\n", print_binary((uint8_t *)&addr4->sin_addr, sizeof(addr4->sin_addr), buffer, 33));
+			break;
+		}
+		}
 
 		printf(" External node: %p, %s/%d\n", (void*)n, output, node->netmask);
 	}
@@ -393,7 +526,7 @@ int main(int argc, char* argv[])
 	/* Read in all prefixes. */
 	in = fopen(input, "r");
 	while (1) {
-		char ip_string[40]; /* Longest v6 string */
+		char ip_string[INET6_ADDRSTRLEN];
 		int mask;
 		uint8_t rt;
 		char line[4096];
@@ -407,11 +540,6 @@ int main(int argc, char* argv[])
 		}
 		rt = sscanf(line, "%39s %d%*[^\n]", ip_string, &mask);
 		if (rt < 2) {
-			continue;
-		}
-
-		/* Doesn't handle IPv6; skip anything that looks like a v6 address. */
-		if (strstr(ip_string, ":") != NULL) {
 			continue;
 		}
 

@@ -2,6 +2,7 @@
 #define __sds_lpm_tree_
 
 #include <stdint.h>
+#include <netinet/in.h>
 
 struct lpm_tree;
 
@@ -50,7 +51,8 @@ void lpm_debug_print(struct lpm_tree* tree);
 #define DAT_NODE 1
 #define INT_NODE 0
 
-#define MAX_BITS 32
+#define MAX_BITS6 128
+#define MAX_BITS4 32
 
 
 
@@ -71,7 +73,7 @@ struct data_node {
 	struct internal_node* l;
 	struct internal_node* r;
 
-	uint32_t prefix;
+	struct sockaddr_storage *prefix;
 	uint8_t netmask;
 };
 
